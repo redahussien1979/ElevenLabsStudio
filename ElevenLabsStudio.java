@@ -332,6 +332,14 @@ public class ElevenLabsStudio extends JFrame {
         JTextField textField = new JTextField(text);
         textField.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 13));
 
+        JButton listen = new JButton("▶ Listen");
+        listen.setMargin(new Insets(2, 6, 2, 6));
+        listen.setToolTipText("Play the generated audio for this line in the system default player");
+
+        JButton regen = new JButton("↻ Regen");
+        regen.setMargin(new Insets(2, 6, 2, 6));
+        regen.setToolTipText("Regenerate audio for this line using its current voice");
+
         JButton applyAll = new JButton("→ all");
         applyAll.setMargin(new Insets(2, 6, 2, 6));
         applyAll.setToolTipText("Apply this voice to all lines");
@@ -344,12 +352,18 @@ public class ElevenLabsStudio extends JFrame {
         panel.add(Box.createHorizontalStrut(6));
         panel.add(textField);
         panel.add(Box.createHorizontalStrut(6));
+        panel.add(listen);
+        panel.add(Box.createHorizontalStrut(4));
+        panel.add(regen);
+        panel.add(Box.createHorizontalStrut(4));
         panel.add(applyAll);
         panel.add(Box.createHorizontalStrut(4));
         panel.add(remove);
 
         LineRow lr = new LineRow(panel, voiceCb, textField);
 
+        listen.addActionListener(e -> listenLine(lr));
+        regen.addActionListener(e -> runInBackground(() -> regenerateLine(lr)));
         applyAll.addActionListener(e -> {
             String v = comboVal(lr.voice);
             for (LineRow r : lineRows) r.voice.setSelectedItem(v);
@@ -392,37 +406,91 @@ public class ElevenLabsStudio extends JFrame {
         if (items.isEmpty()) { log("No quotes found. Add quotes or load a file."); return; }
 
         log("Found " + items.size() + " quotes to convert.");
+        String ttsSettings = ttsSettingsJson();
         String model = comboVal(ttsModel);
 
-        String settings = "{"
+        int ok = 0;
+        for (int i = 0; i < items.size(); i++) {
+            QuoteItem it = items.get(i);
+            File out = ttsAudioFile(i);
+            log("Generating audio " + (i + 1) + " [voice " + it.voice + "]: \"" + preview(it.text) + "\"");
+            if (generateOneTts(it.voice, it.text, model, ttsSettings, out)) ok++;
+        }
+        log("");
+        log("Generated " + ok + " out of " + items.size() + " audio files.");
+    }
+
+    private String ttsSettingsJson() {
+        return "{"
                 + "\"speed\":" + num(ttsSpeed) + ","
                 + "\"stability\":" + num(ttsStab) + ","
                 + "\"similarity_boost\":" + num(ttsSim) + ","
                 + "\"use_speaker_boost\":" + ttsBoost.isSelected()
                 + "}";
+    }
 
-        int ok = 0;
-        for (int i = 0; i < items.size(); i++) {
-            QuoteItem it = items.get(i);
-            log("Generating audio " + (i + 1) + " [voice " + it.voice + "]: \"" + preview(it.text) + "\"");
-            String body = "{"
-                    + "\"text\":" + jsonStr(it.text) + ","
-                    + "\"model_id\":" + jsonStr(model) + ","
-                    + "\"voice_settings\":" + settings
-                    + "}";
-            try {
-                byte[] audio = postForBytes(
-                        "https://api.elevenlabs.io/v1/text-to-speech/" + it.voice, body);
-                File f = new File(workDir(), ttsPrefix.getText().trim() + (i + 1) + ".mp3");
-                Files.write(f.toPath(), audio);
-                log("Saved: " + f.getName());
-                ok++;
-            } catch (Exception e) {
-                log("Error generating audio for quote " + (i + 1) + ": " + e.getMessage());
-            }
+    private File ttsAudioFile(int zeroBasedIdx) {
+        return new File(workDir(), ttsPrefix.getText().trim() + (zeroBasedIdx + 1) + ".mp3");
+    }
+
+    private boolean generateOneTts(String voice, String text, String model, String settings, File out) {
+        String body = "{"
+                + "\"text\":" + jsonStr(text) + ","
+                + "\"model_id\":" + jsonStr(model) + ","
+                + "\"voice_settings\":" + settings
+                + "}";
+        try {
+            byte[] audio = postForBytes(
+                    "https://api.elevenlabs.io/v1/text-to-speech/" + voice, body);
+            Files.write(out.toPath(), audio);
+            log("Saved: " + out.getName());
+            return true;
+        } catch (Exception e) {
+            log("Error generating audio for " + out.getName() + ": " + e.getMessage());
+            return false;
         }
-        log("");
-        log("Generated " + ok + " out of " + items.size() + " audio files.");
+    }
+
+    /** 0-based index of this row among non-empty rows, or -1 if empty/not found. */
+    private int nonEmptyIndex(LineRow target) {
+        int idx = 0;
+        for (LineRow r : lineRows) {
+            if (r.text.getText().trim().isEmpty()) continue;
+            if (r == target) return idx;
+            idx++;
+        }
+        return -1;
+    }
+
+    private void listenLine(LineRow row) {
+        int idx = nonEmptyIndex(row);
+        if (idx < 0) { log("Listen: line is empty — type some text first."); return; }
+        File f = ttsAudioFile(idx);
+        if (!f.exists()) {
+            log("Listen: no audio yet at " + f.getName() + " — click Regen or Generate Audio first.");
+            return;
+        }
+        try {
+            if (!Desktop.isDesktopSupported() || !Desktop.getDesktop().isSupported(Desktop.Action.OPEN)) {
+                log("Listen: Desktop.open not supported on this system. File is at " + f.getAbsolutePath());
+                return;
+            }
+            Desktop.getDesktop().open(f);
+            log("Listen: playing " + f.getName());
+        } catch (Exception e) {
+            log("Listen: error opening " + f.getName() + ": " + e.getMessage());
+        }
+    }
+
+    private void regenerateLine(LineRow row) {
+        String text = row.text.getText().trim();
+        if (text.isEmpty()) { log("Regen: line is empty — type some text first."); return; }
+        int idx = nonEmptyIndex(row);
+        if (idx < 0) { log("Regen: could not locate this line."); return; }
+        String voice = comboVal(row.voice);
+        File out = ttsAudioFile(idx);
+        log("Regenerating audio " + (idx + 1) + " [voice " + voice + "]: \"" + preview(text) + "\"");
+        generateOneTts(voice, text, comboVal(ttsModel), ttsSettingsJson(), out);
     }
 
     // ====================================================================
