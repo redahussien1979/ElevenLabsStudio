@@ -26,11 +26,12 @@ public class ElevenLabsStudio extends JFrame {
     // ---- shared config widgets ----
     private final JTextField apiKeyField  = new JTextField("sk_085b309952bcc3227379faa49e8f49d40478fda3985840e7");
     private final JTextField workDirField = new JTextField(System.getProperty("user.dir"));
-    private final JTextArea  scriptArea   = new JTextArea();
+    private final JPanel     linesContainer = new JPanel();
+    private final List<LineRow> lineRows    = new ArrayList<>();
     private final JTextArea  logArea       = new JTextArea();
 
     // ---- TTS (option 1) settings ----
-    private final JComboBox<String> ttsVoice = voiceCombo("TX3LPaxmHKxFdv7VOQHJ"); // Liam
+    private final JComboBox<String> ttsVoice = voiceCombo("TX3LPaxmHKxFdv7VOQHJ"); // Liam — default for new lines
     private final JComboBox<String> ttsModel = modelCombo("eleven_v3");
     private final JTextField ttsPrefix = new JTextField("phil");
     private final JTextField ttsSpeed  = new JTextField("0.1");
@@ -39,7 +40,6 @@ public class ElevenLabsStudio extends JFrame {
     private final JCheckBox  ttsBoost  = new JCheckBox("speaker_boost", true);
 
     // ---- Timestamps (option 5) settings ----
-    private final JComboBox<String> tsVoice = voiceCombo("FyrYFW3P9GUxA348YGWu"); // Madison Ray
     private final JComboBox<String> tsModel = modelCombo("eleven_v3");
     private final JTextField tsPrefix= new JTextField("b");
     private final JTextField tsStab  = new JTextField("0.9");
@@ -90,18 +90,30 @@ public class ElevenLabsStudio extends JFrame {
         cfg.add(browse, g);
 
         // ---- CENTER: quotes (top) + log (bottom) ----
-        scriptArea.setFont(mono);
-        scriptArea.setLineWrap(false);
+        linesContainer.setLayout(new BoxLayout(linesContainer, BoxLayout.Y_AXIS));
+        addLineRow("", comboVal(ttsVoice));   // start with one empty row
+
         JPanel scriptPanel = new JPanel(new BorderLayout());
-        scriptPanel.setBorder(new TitledBorder("Quotes / script  (one quote per line — same as myscript.txt)"));
-        scriptPanel.add(new JScrollPane(scriptArea), BorderLayout.CENTER);
+        scriptPanel.setBorder(new TitledBorder(
+                "Quotes  (one per row · voice picker per row · Enter adds a new row)"));
+
+        JPanel linesWrap = new JPanel(new BorderLayout());
+        linesWrap.add(linesContainer, BorderLayout.NORTH);
+        scriptPanel.add(new JScrollPane(linesWrap), BorderLayout.CENTER);
+
         JPanel scriptBtns = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        JButton addLine = new JButton("Add line");
+        addLine.addActionListener(e -> {
+            addLineRow("", comboVal(ttsVoice));
+            refreshLines();
+        });
         JButton loadScript = new JButton("Load file…");
         loadScript.addActionListener(e -> loadScriptFile());
         JButton saveScript = new JButton("Save as myscript.txt");
         saveScript.addActionListener(e -> saveScriptFile());
         JButton clearLog = new JButton("Clear log");
         clearLog.addActionListener(e -> logArea.setText(""));
+        scriptBtns.add(addLine);
         scriptBtns.add(loadScript);
         scriptBtns.add(saveScript);
         scriptBtns.add(clearLog);
@@ -124,7 +136,8 @@ public class ElevenLabsStudio extends JFrame {
 
         // 1) TTS
         JPanel ttsBox = settingsBox("1 · Generate Audio (TTS)");
-        addRow(ttsBox, "Voice ID", ttsVoice);
+        ttsVoice.setToolTipText("Default voice for new lines. Each line in the script has its own voice picker that overrides this.");
+        addRow(ttsBox, "Default voice", ttsVoice);
         addRow(ttsBox, "Model ID", ttsModel);
         addRow(ttsBox, "File prefix", ttsPrefix);
         addRow(ttsBox, "speed", ttsSpeed);
@@ -138,7 +151,6 @@ public class ElevenLabsStudio extends JFrame {
 
         // 5) Timestamps
         JPanel tsBox = settingsBox("5 · TTS + Emphasized Timestamps");
-        addRow(tsBox, "Voice ID", tsVoice);
         addRow(tsBox, "Model ID", tsModel);
         addRow(tsBox, "File prefix", tsPrefix);
         addRow(tsBox, "stability", tsStab);
@@ -257,7 +269,15 @@ public class ElevenLabsStudio extends JFrame {
         JFileChooser fc = new JFileChooser(workDir());
         if (fc.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
             try {
-                scriptArea.setText(new String(Files.readAllBytes(fc.getSelectedFile().toPath()), StandardCharsets.UTF_8));
+                String content = new String(Files.readAllBytes(fc.getSelectedFile().toPath()), StandardCharsets.UTF_8);
+                clearLineRows();
+                String defaultVoice = comboVal(ttsVoice);
+                for (String line : content.split("\n", -1)) {
+                    String t = line.trim();
+                    if (!t.isEmpty()) addLineRow(t, defaultVoice);
+                }
+                if (lineRows.isEmpty()) addLineRow("", defaultVoice);
+                refreshLines();
                 log("Loaded script: " + fc.getSelectedFile().getName());
             } catch (Exception e) { log("Error reading script: " + e.getMessage()); }
         }
@@ -265,20 +285,101 @@ public class ElevenLabsStudio extends JFrame {
 
     private void saveScriptFile() {
         try {
+            StringBuilder sb = new StringBuilder();
+            for (LineRow r : lineRows) sb.append(r.text.getText()).append("\n");
             File out = new File(workDir(), "myscript.txt");
-            Files.write(out.toPath(), scriptArea.getText().getBytes(StandardCharsets.UTF_8));
+            Files.write(out.toPath(), sb.toString().getBytes(StandardCharsets.UTF_8));
             log("Saved: " + out.getAbsolutePath());
         } catch (Exception e) { log("Error saving script: " + e.getMessage()); }
     }
 
-    /** Read quotes from the text area: one per line, trimmed, non-empty. */
+    /** Read quotes from the line rows: trimmed, non-empty. */
     private List<String> readQuotes() {
         List<String> quotes = new ArrayList<>();
-        for (String line : scriptArea.getText().split("\n", -1)) {
-            String t = line.trim();
+        for (LineRow r : lineRows) {
+            String t = r.text.getText().trim();
             if (!t.isEmpty()) quotes.add(t);
         }
         return quotes;
+    }
+
+    /** Read non-empty lines as (voice, text) pairs. */
+    private List<QuoteItem> readQuoteItems() {
+        List<QuoteItem> items = new ArrayList<>();
+        for (LineRow r : lineRows) {
+            String t = r.text.getText().trim();
+            if (!t.isEmpty()) items.add(new QuoteItem(comboVal(r.voice), t));
+        }
+        return items;
+    }
+
+    // ---- line row helpers ----
+    private void addLineRow(String text, String voiceId) {
+        insertLineRow(lineRows.size(), text, voiceId);
+    }
+
+    private LineRow insertLineRow(int idx, String text, String voiceId) {
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.X_AXIS));
+        panel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 28));
+        panel.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        String seed = (voiceId == null || voiceId.isEmpty()) ? comboVal(ttsVoice) : voiceId;
+        JComboBox<String> voiceCb = voiceCombo(seed);
+        voiceCb.setPreferredSize(new Dimension(260, 24));
+        voiceCb.setMaximumSize(new Dimension(260, 24));
+
+        JTextField textField = new JTextField(text);
+        textField.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 13));
+
+        JButton applyAll = new JButton("→ all");
+        applyAll.setMargin(new Insets(2, 6, 2, 6));
+        applyAll.setToolTipText("Apply this voice to all lines");
+
+        JButton remove = new JButton("×");
+        remove.setMargin(new Insets(2, 6, 2, 6));
+        remove.setToolTipText("Remove this line");
+
+        panel.add(voiceCb);
+        panel.add(Box.createHorizontalStrut(6));
+        panel.add(textField);
+        panel.add(Box.createHorizontalStrut(6));
+        panel.add(applyAll);
+        panel.add(Box.createHorizontalStrut(4));
+        panel.add(remove);
+
+        LineRow lr = new LineRow(panel, voiceCb, textField);
+
+        applyAll.addActionListener(e -> {
+            String v = comboVal(lr.voice);
+            for (LineRow r : lineRows) r.voice.setSelectedItem(v);
+        });
+        remove.addActionListener(e -> {
+            lineRows.remove(lr);
+            linesContainer.remove(lr.panel);
+            refreshLines();
+        });
+        textField.addActionListener(e -> {
+            int i = lineRows.indexOf(lr);
+            if (i < 0) return;
+            LineRow added = insertLineRow(i + 1, "", comboVal(lr.voice));
+            refreshLines();
+            added.text.requestFocusInWindow();
+        });
+
+        lineRows.add(idx, lr);
+        linesContainer.add(panel, idx);
+        return lr;
+    }
+
+    private void refreshLines() {
+        linesContainer.revalidate();
+        linesContainer.repaint();
+    }
+
+    private void clearLineRows() {
+        lineRows.clear();
+        linesContainer.removeAll();
     }
 
     // ====================================================================
@@ -287,11 +388,10 @@ public class ElevenLabsStudio extends JFrame {
     private void doGenerateTts() {
         log("Starting Quote Audio Generation...");
         log("====================================");
-        List<String> quotes = readQuotes();
-        if (quotes.isEmpty()) { log("No quotes found. Add quotes or load a file."); return; }
+        List<QuoteItem> items = readQuoteItems();
+        if (items.isEmpty()) { log("No quotes found. Add quotes or load a file."); return; }
 
-        log("Found " + quotes.size() + " quotes to convert.");
-        String voice = comboVal(ttsVoice);
+        log("Found " + items.size() + " quotes to convert.");
         String model = comboVal(ttsModel);
 
         String settings = "{"
@@ -302,17 +402,17 @@ public class ElevenLabsStudio extends JFrame {
                 + "}";
 
         int ok = 0;
-        for (int i = 0; i < quotes.size(); i++) {
-            String quote = quotes.get(i);
-            log("Generating audio " + (i + 1) + ": \"" + preview(quote) + "\"");
+        for (int i = 0; i < items.size(); i++) {
+            QuoteItem it = items.get(i);
+            log("Generating audio " + (i + 1) + " [voice " + it.voice + "]: \"" + preview(it.text) + "\"");
             String body = "{"
-                    + "\"text\":" + jsonStr(quote) + ","
+                    + "\"text\":" + jsonStr(it.text) + ","
                     + "\"model_id\":" + jsonStr(model) + ","
                     + "\"voice_settings\":" + settings
                     + "}";
             try {
                 byte[] audio = postForBytes(
-                        "https://api.elevenlabs.io/v1/text-to-speech/" + voice, body);
+                        "https://api.elevenlabs.io/v1/text-to-speech/" + it.voice, body);
                 File f = new File(workDir(), ttsPrefix.getText().trim() + (i + 1) + ".mp3");
                 Files.write(f.toPath(), audio);
                 log("Saved: " + f.getName());
@@ -322,7 +422,7 @@ public class ElevenLabsStudio extends JFrame {
             }
         }
         log("");
-        log("Generated " + ok + " out of " + quotes.size() + " audio files.");
+        log("Generated " + ok + " out of " + items.size() + " audio files.");
     }
 
     // ====================================================================
@@ -331,10 +431,9 @@ public class ElevenLabsStudio extends JFrame {
     private void doTimestamps() {
         log("TTS + EMPHASIZED WORD TIMESTAMPS");
         log("================================");
-        List<String> quotes = readQuotes();
-        if (quotes.isEmpty()) { log("No quotes found."); return; }
+        List<QuoteItem> items = readQuoteItems();
+        if (items.isEmpty()) { log("No quotes found."); return; }
 
-        String voice = comboVal(tsVoice);
         String model = comboVal(tsModel);
         String settings = "{"
                 + "\"stability\":" + num(tsStab) + ","
@@ -344,8 +443,9 @@ public class ElevenLabsStudio extends JFrame {
                 + "}";
 
         List<String> allRows = new ArrayList<>();
-        for (int i = 0; i < quotes.size(); i++) {
-            List<String> starts = generateAudioWithTimestamps(quotes.get(i), i, voice, model, settings);
+        for (int i = 0; i < items.size(); i++) {
+            QuoteItem it = items.get(i);
+            List<String> starts = generateAudioWithTimestamps(it.text, i, it.voice, model, settings);
             if (starts != null) allRows.add(String.join(",", starts));
         }
         try {
@@ -691,6 +791,20 @@ public class ElevenLabsStudio extends JFrame {
     private static class Word {
         String word; double start, end;
         Word(String w, double s, double e) { word = w; start = s; end = e; }
+    }
+
+    /** One row in the quotes panel: a voice picker + a text field. */
+    private static class LineRow {
+        final JPanel panel;
+        final JComboBox<String> voice;
+        final JTextField text;
+        LineRow(JPanel p, JComboBox<String> v, JTextField t) { panel = p; voice = v; text = t; }
+    }
+
+    /** A non-empty quote line paired with the voice selected on its row. */
+    private static class QuoteItem {
+        final String voice, text;
+        QuoteItem(String v, String t) { voice = v; text = t; }
     }
 
     private static void writeAscii(ByteArrayOutputStream b, String s) {
